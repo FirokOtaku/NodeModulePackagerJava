@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "beercss": "^3.5.6",
+    "vue": "^2.7.16"
+  }
+}
