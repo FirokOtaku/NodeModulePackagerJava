@@ -13,7 +13,18 @@ public @interface NodeModuleSource
     String value();
 
     /**
-     * 是否需要将此 node_module 依赖的 node_module 一并添加.
+     * 是否需要打包为 jar
      * */
-    boolean dependencies() default true;
+    boolean packaging() default true;
+
+    /**
+     * 如果需要打包为 jar, 目标文件名是什么;
+     * 如果不需要打包为 jar, 目标路径是什么.
+     * */
+    String target() default Constants.DefaultTarget;
+
+    /**
+     * 需要打包哪些文件, 这会覆盖 package.json 中的 files 字段
+     * */
+    String[] files() default {};
 }

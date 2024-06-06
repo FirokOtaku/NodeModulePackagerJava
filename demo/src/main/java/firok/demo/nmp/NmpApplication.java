@@ -9,7 +9,7 @@ import javafx.scene.Scene;
 import javafx.stage.Stage;
 
 @NodeModuleSources({
-        @NodeModuleSource("beercss"),
+        @NodeModuleSource(value = "beercss", packaging = false),
         @NodeModuleSource("vue"),
 })
 public class NmpApplication extends Application

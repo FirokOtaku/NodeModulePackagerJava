@@ -13,14 +13,18 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 @SuppressWarnings({"unused", "FieldCanBeLocal"})
 @SupportedAnnotationTypes({"firok.tool.nmp.NodeModuleSources"})
 @SupportedSourceVersion(SourceVersion.RELEASE_21)
-@SupportedOptions("project.basedir")
+@SupportedOptions(Constants.OptionBasedir)
 public class NodeModulePackager extends AbstractProcessor
 {
     private Types typeUtils;
@@ -40,204 +44,190 @@ public class NodeModulePackager extends AbstractProcessor
         messager.printMessage(Diagnostic.Kind.ERROR,"[NMP] " + obj);
     }
 
+    private File pathRoot; // 正在编译的项目根目录
+    private File pathNmpCache; // nmp 的缓存目录
+    private File pathRealNodeModules; // 所有的 node_modules
+    private File getNodeModuleFolder(String name) // 获取某个 node_module 的真实目录
+    {
+        return new File(pathRealNodeModules, name);
+    }
+    private File getNodeModuleCache(String name, String version) // 获取某个 node_module 的缓存文件
+    {
+        return new File(pathNmpCache, name + "-" + version + ".bin");
+    }
+
     @Override
-    public synchronized void init(ProcessingEnvironment processingEnv) {
-        super.init(processingEnv);
-        typeUtils = processingEnv.getTypeUtils();
-        elementUtils = processingEnv.getElementUtils();
-        filer = processingEnv.getFiler();
-        messager = processingEnv.getMessager();
+    public synchronized void init(ProcessingEnvironment pe) {
+        super.init(pe);
+        typeUtils = pe.getTypeUtils();
+        elementUtils = pe.getElementUtils();
+        filer = pe.getFiler();
+        messager = pe.getMessager();
 
         messager.printMessage(Diagnostic.Kind.NOTE,"NMP ADT 初始化完成");
+
+        var rawBasedir = processingEnv.getOptions().get(Constants.OptionBasedir);
+        if(rawBasedir == null || rawBasedir.isEmpty())
+        {
+            printError("未配置 npm.basedir 环境变量");
+        }
+
+        try
+        {
+            assert rawBasedir != null;
+            var temp = new File(rawBasedir).getCanonicalFile();
+
+            if(!temp.isDirectory())
+                throw new RuntimeException();
+
+            pathRoot = temp;
+            pathNmpCache = new File(pathRoot, ".nmp").getCanonicalFile();
+            pathRealNodeModules = new File(pathRoot, "node_modules").getCanonicalFile();
+        }
+        catch (Exception any)
+        {
+            printError("npm.basedir 解析错误, 无法解析为一个已存在的目录: " + rawBasedir);
+        }
+
+        //noinspection ResultOfMethodCallIgnored
+        pathNmpCache.mkdirs();
     }
 
     @Override
     public boolean process(Set<? extends TypeElement> set, RoundEnvironment re)
     {
-        try
-        {
-            var basedir = processingEnv.getOptions().get("project.basedir");
-            if(basedir == null || basedir.isEmpty())
-            {
-                printError("无法获取项目路径, 请确保已经在配置了环境变量 project.basedir. 详情请查阅使用文档");
-            }
-            assert basedir != null;
+        var pathNodeModules = new File(pathRoot, "node_modules");
+        var pathCache = new File(pathRoot, ".nmp"); // 缓存目录
+        var fileCacheIndex = new File(pathCache, "index.json");
 
-            var pathRoot = new File(basedir);
-            var pathNodeModules = new File(pathRoot, "node_modules");
-            var pathCache = new File(pathRoot, ".nmp");
-            var fileCacheIndex = new File(pathCache, "index.json");
+        var eles = re.getElementsAnnotatedWith(NodeModuleSources.class);
+        // 每个 NodeModuleSource 视为一个处理单元
+        eles.forEach(ele -> {
+            // 简单读取一下类信息
+            var eleClass = ele.asType();
+            var eleFullClassName = eleClass.toString(); // 类全限定名
 
-            var eles = re.getElementsAnnotatedWith(NodeModuleSources.class);
-            for(var ele : eles)
+            try
             {
-                var eleType = ele.asType();
-                var eleName = eleType.toString();
-                printNote("处理元素: " + eleName);
+                var om = new ObjectMapper();
+
+                // 从类全限定名里提取 package 名
+                var lastDotIndex = eleFullClassName.lastIndexOf('.');
+                var packageName = lastDotIndex >= 0 ? eleFullClassName.substring(0, lastDotIndex) : "";
+
+                printNote("处理 Node 依赖项: " + eleFullClassName);
                 var anno = ele.getAnnotation(NodeModuleSources.class);
 
-                var pathCacheIndex = new File(pathRoot, eleName + "-index.json");
-                var pathCacheInstance = new File(pathCache, eleName + "-cache.bin");
+                for(var source : anno.value())
+                {
+                    var nmName = source.value();
+                    var nmPackaging = source.packaging();
+                    var nmTarget = source.target();
 
-                processInternal(
-                        pathRoot,
-                        pathNodeModules,
+                    // 读取真实 node_module 信息
+                    var folderNodeModule = new File(pathRealNodeModules, nmName);
+                    var pathNodeModule = folderNodeModule.toPath();
 
-                        pathCache,
-                        pathCacheIndex,
-                        pathCacheInstance,
+                    if(nmPackaging) // 打包形式
+                    {
+                        if(Constants.DefaultTarget.equals(nmTarget))
+                            nmTarget = nmName + ".jar";
 
-                        eleName,
-                        anno
-                );
+                        var fileNodeModulePackageJson = new File(folderNodeModule, "package.json");
+                        var beanPackageJson = om.readValue(fileNodeModulePackageJson, PackageInfo.class);
+
+                        var nmVersion = beanPackageJson.version;
+
+                        // 检查缓存状态
+                        var fileCachedNodeModule = getNodeModuleCache(nmName, nmVersion);
+                        if(!fileCachedNodeModule.exists()) // 开始创建缓存
+                        {
+                            fileCachedNodeModule.getParentFile().mkdirs();
+                            fileCachedNodeModule.createNewFile();
+                            try(var ofs = new FileOutputStream(fileCachedNodeModule);
+                                var ozs = new ZipOutputStream(ofs);
+                                var paths = Files.walk(pathNodeModule)
+                                        .filter(Files::isRegularFile)
+                            )
+                            {
+                                for(var pathFile : paths.toList())
+                                {
+                                    var relativePath = pathNodeModule.relativize(pathFile);
+                                    var entryName = relativePath.toString();
+                                    var entry = new ZipEntry(entryName);
+                                    ozs.putNextEntry(entry);
+                                    try(var ifs = new FileInputStream(pathFile.toFile()))
+                                    {
+                                        ifs.transferTo(ozs);
+                                    }
+                                    ozs.closeEntry();
+                                }
+                                ozs.finish();
+                                ozs.flush();
+                            }
+                        }
+                        // 把缓存复制到目标目录
+                        var targetFile = filer.createResource(
+                                StandardLocation.CLASS_OUTPUT,
+                                packageName,
+                                nmTarget
+                        );
+                        try(var ifs = new FileInputStream(fileCachedNodeModule);
+                            var ofs = targetFile.openOutputStream())
+                        {
+                            ifs.transferTo(ofs);
+                        }
+                    }
+                    else // 不打包, 直接把所有文件输出为资源文件
+                    {
+                        if(Constants.DefaultTarget.equals(nmTarget))
+                            nmTarget = packageName + "." + nmName;
+
+                        try(var paths = Files.walk(pathNodeModule))
+                        {
+                            for(var path : paths.toList())
+                            {
+                                var isFile = Files.isRegularFile(path);
+                                var isDir = Files.isDirectory(path);
+
+                                if(isFile)
+                                {
+                                    var relativePath = pathNodeModule.relativize(path)
+                                            .toString()
+                                            .replaceAll("\\\\", "/");
+
+                                    if(relativePath.contains("/"))
+                                    {
+                                        var index = relativePath.lastIndexOf("/");
+                                        var folder = relativePath.substring(0, index);
+                                        var file = relativePath.substring(index + 1);
+
+                                        nmTarget = nmTarget + "." + folder.replaceAll("/", ".");
+                                        relativePath = file;
+                                    }
+
+                                    var targetFile = filer.createResource(
+                                            StandardLocation.CLASS_OUTPUT,
+                                            nmTarget,
+                                            relativePath
+                                    );
+                                    try(var ifs = new FileInputStream(path.toFile());
+                                        var ofs = targetFile.openOutputStream())
+                                    {
+                                        ifs.transferTo(ofs);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        }
-        catch (Exception any)
-        {
-            printError("发生错误");
-            printError(any);
-        }
+            catch (Exception any)
+            {
+                printError("处理 " + eleFullClassName + " 的 Node 依赖项时发生未知错误: " + any.getLocalizedMessage());
+            }
+        });
 
         return true;
     }
-
-    private interface Handler
-    {
-        void handle(Set<String> set, String name, boolean dep) throws Exception;
-    }
-
-    private void copyToZip(String[] trees, File source, ZipOutputStream ozs) throws IOException
-    {
-        var filename = source.getName();
-        var parts = new ArrayList<>(Arrays.asList(trees));
-        parts.add(filename);
-        if(source.isFile())
-        {
-            var parts2 = new ArrayList<>(parts);
-            parts2.remove(0);
-            var entryName = String.join("/", parts2);
-
-            var entry = new ZipEntry(entryName);
-            ozs.putNextEntry(entry);
-            try(var ifs = new FileInputStream(source))
-            {
-                ifs.transferTo(ozs);
-            }
-            ozs.closeEntry();
-        }
-        if(source.isDirectory())
-        {
-            var arr = parts.toArray(new String[0]);
-            var children = source.listFiles();
-            if(children == null) return;
-            for(var child : children)
-            {
-                copyToZip(arr, child, ozs);
-            }
-        }
-    }
-    private void copyToRaw(String[] trees, File source) throws IOException
-    {
-        var filename = source.getName();
-        var parts = new ArrayList<>(Arrays.asList(trees));
-        parts.add(filename);
-        if(source.isFile())
-        {
-            var targetFile = filer.createResource(StandardLocation.CLASS_OUTPUT, "", String.join("/", parts));
-            try(var ifs = new FileInputStream(source);
-                var ofs = targetFile.openOutputStream())
-            { ifs.transferTo(ofs); }
-        }
-        if(source.isDirectory())
-        {
-            var arr = parts.toArray(new String[0]);
-            var children = source.listFiles();
-            if(children == null) return;
-            for(var child : children)
-            {
-                copyToRaw(arr, child);
-            }
-        }
-    }
-
-    private void processInternal(
-            File pathRoot,
-            File pathNodeModules,
-
-            File pathCache,
-            File fileCacheIndex,
-            File fileCacheInstance,
-
-            String eleName,
-            NodeModuleSources anno
-    ) throws IOException
-    {
-        var om = new ObjectMapper();
-
-        //noinspection ResultOfMethodCallIgnored
-        pathCache.mkdirs();
-
-        // 读取
-        var rpTarget = anno.target();
-        var listNeededNodeModule = anno.value();
-        var setAddedDep = new HashSet<String>();
-        var mapDepPackageJson = new HashMap<String, PackageInfo>();
-
-        for(var neededNodeModule : listNeededNodeModule)
-        {
-            var nameDep = neededNodeModule.value();
-            var withDep = neededNodeModule.dependencies();
-
-            var pathDep = new File(pathNodeModules, nameDep);
-
-//            var fileDepPackageJson = new File(pathDep, "package.json");
-//            var beanDepPackageJson = om.readValue(fileDepPackageJson, PackageInfo.class);
-//            ;
-
-            switch (nameDep)
-            {
-                case "beercss" -> copyToRaw(new String[] { "node_modules" }, pathDep);
-                case "vue" -> {
-                    var targetSource = filer.createResource(
-                            StandardLocation.CLASS_OUTPUT,
-                            "",
-                            nameDep + ".jar" // todo 调整目标输出文件路径
-                    );
-                    try(var ofs = targetSource.openOutputStream();
-                        var ozs = new ZipOutputStream(ofs))
-                    {
-                        copyToZip(new String[0], pathDep, ozs);
-                        ozs.finish();
-                        ozs.flush();
-                    }
-                    catch (Exception any)
-                    {
-                        printWarning(any);
-                    }
-                }
-
-            }
-
-//            copyToRaw(new String[] { "node_modules" }, pathDep);
-
-//            var targetSource = filer.createResource(
-//                    StandardLocation.CLASS_OUTPUT,
-//                    "",
-//                    nameDep + ".jar" // todo 调整目标输出文件路径
-//            );
-//            try(var ofs = targetSource.openOutputStream();
-//                var ozs = new ZipOutputStream(ofs))
-//            {
-//                copyToZip(new String[0], pathDep, ozs);
-//                ozs.finish();
-//                ozs.flush();
-//            }
-//            catch (Exception any)
-//            {
-//                printWarning(any);
-//            }
-        }
-
-    }
-
 }

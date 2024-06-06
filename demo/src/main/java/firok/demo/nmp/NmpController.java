@@ -34,11 +34,10 @@ public class NmpController
                     System.out.println(state);
                     if(state == Worker.State.RUNNING)
                     {
-                        try
+                        var urlJar = NmpApplication.class.getResource("/firok/demo/nmp/vue.jar");
+                        try(var cl = new URLClassLoader(new URL[] { urlJar }))
                         {
-                            var urlJar = NmpApplication.class.getResource("/vue.jar");
-                            var cl = new URLClassLoader(new URL[] { urlJar });
-                            var resVueJs = cl.getResource("dist/vue.js");
+                            var resVueJs = cl.getResource("dist\\vue.js");
                             String contentVue;
                             try(var ifs = resVueJs.openStream())
                             {
