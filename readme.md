@@ -6,7 +6,7 @@
 
 此工具 **不会** 自动下载 Node.js 和 Node.js 依赖, 需要你手动安装 Node.js 并使用 `npm install xxx` 指令安装依赖.
 
-简单的应用场景:
+简单的应用场景, 将 Node.js 依赖引入项目后:
 
 * 使用 GraalJS 直接运行 JavaScript 脚本
 * 在 JavaFX 的 WebView 中运行 Vue.js 等库
@@ -35,11 +35,16 @@
      <scope>compile</scope>
    </dependency>
    ```
-3. 在需要打包 Node.js 依赖的 Java 项目安装需要打包 Node.js 依赖
+3. 启用并配置 APT功能:  
+   `src/main/resources/META-INF/services/javafx.annotation.processing.Processor`
+   ```text
+   firok.tool.nmp.NodeModulePackager
+   ```
+4. 在需要打包 Node.js 依赖的 Java 项目安装需要打包 Node.js 依赖
    ```bash
    npm install xxx
    ```
-4. 在项目任意类 (一般在主类) 声明并配置注解
+5. 在项目任意类 (一般在主类) 声明并配置注解
    ```java
    import firok.tool.nmp.NodeModuleSource;
    import firok.tool.nmp.NodeModuleSources;
@@ -52,6 +57,6 @@
      public static void main(String[] args) { }
    }
    ```
-5. 编译项目, 配置的依赖项会作为资源文件一并编译
+6. 编译项目, 配置的依赖项会作为资源文件一并编译
 
 > [demo](demo) 目录即为示例项目
